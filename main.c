@@ -1,6 +1,9 @@
 /*
  * File:   main.c
  * Author: Затолокин Павел
+ * 
+ * PIC12F1822 / Int OSC @ 16MHz, 5V
+ * Compiler: XC8 v2.00, MPLAB X IDE v5.05
  *
  * Created on 21 августа 2018 г., 23:24
  * 
@@ -35,7 +38,7 @@
 #include <pic.h>            // общий для всех PIC
 #include <pic12f1822.h>
 
-#define _XTAL_FREQ 20000000 // указываем рабочую частоту для функций задержки
+#define _XTAL_FREQ 16000000 // указываем рабочую частоту для функций задержки
 
 // Объявление глобальных переменных
 unsigned char temp = 0;			// временная переменная
@@ -43,6 +46,7 @@ unsigned char temp = 0;			// временная переменная
 // Объявление всех функций, которые написаны после их вызова
 void init_UART(void);
 char read_UART(void);
+void write_UART(char);
 
 
 
@@ -55,15 +59,21 @@ char read_UART(void);
 
 // Главная функция программы. С неё начинается выполнение программы.
 void main(void) {
+    OSCCONbits.IRCF = 0b1111;   // Internal Oscillator Frequency = 16 MHz HF
+    OSCCONbits.SCS = 0b00;      // System Clock determined by FOSC<2:0> in Configuration Word 1.
     INTCONbits.GIE = 1;         // глобально разрешаем прерывания
     INTCONbits.PEIE = 1;        // разрешаем прерывания от периферии
     TRISA   = 0x00;         // порт A весь на выход
     RA2     = 1;
     
     init_UART();            // конфигурируем порт RS-232
+    __delay_ms(2000);
+    RA2 = 0;
+//    write_UART('A');
     
     while(1) {
 //        RA2 = BAUDCONbits.RCIDL;
+//        RA2 = RA5;
     }
 }
 
@@ -71,7 +81,7 @@ void main(void) {
 // Main Interrupt Service Routine (ISR)
 void __interrupt() ISR(void) {
 //    if(RCIF) {              // если прерывание от принятого байта по RS-232 (UART)
-        read_UART();        // читаем что же там пришло и реагируем
+//        read_UART();        // читаем что же там пришло и реагируем
 //    }
 }
 
@@ -81,14 +91,14 @@ void init_UART(void) {
     TRISAbits.TRISA4 = 0;       // TX Pin set as output
     TRISAbits.TRISA5 = 1;       // RX Pin set as input
     ANSELAbits.ANSA4 = 0;       // Digital I/O (регистр ANSELA)
-//    PIE1bits.TXIE = 1;          // Enables the USART transmit interrupt
+    PIE1bits.TXIE = 1;          // Enables the USART transmit interrupt
     PIE1bits.RCIE = 1;          // Enables the USART receive interrupt
     BAUDCONbits.SCKP  = 0;      // Transmit non-inverted data to the TX/CK pin
-    BAUDCONbits.BRG16 = 1;      // 16-bit Baud Rate Generator is used
+    BAUDCONbits.BRG16 = 0;      // 8-bit Baud Rate Generator is used
     BAUDCONbits.WUE   = 0;      // Wake-up Enable bit = Receiver is operating normally
     BAUDCONbits.ABDEN = 0;      // Auto-Baud Detect mode is disabled
-    SPBRGH = 0x02;              // determines the period of the free running baud rate timer (520)
-    SPBRGL = 0x08;              // determines the period of the free running baud rate timer (520)
+    SPBRGH = 0;              // determines the period of the free running baud rate timer (520)
+    SPBRGL = 25;              // determines the period of the free running baud rate timer (520)
     // регистр TXSTA: transmit status and control register
     TXSTAbits.BRGH = 1;         // High Baud Rate Select bit
     TXSTAbits.TX9  = 0;         // 9-bit Transmit Enable bit
@@ -97,17 +107,22 @@ void init_UART(void) {
     TXSTAbits.TXEN = 1;         // Transmit Enable bit
     // регистр RCSTA: receive status and control register
     RCSTAbits.RX9  = 0;         // Selects 8-bit reception
-    RCSTAbits.SPEN = 1;         // Serial port enabled (configures RX/DT and TX/CK pins as serial port pins)
-    RCSTAbits.CREN = 1;         // Enables receiver
+//    RCSTAbits.SPEN = 1;         // Serial port enabled (configures RX/DT and TX/CK pins as serial port pins)
+//    RCSTAbits.CREN = 1;         // Enables receiver
 }
 
 // Получение данных по шине RS-232
 char read_UART(void) {
-    RA2 = 0;            // test
-    if(OERR) {          // check for Error 
-        CREN = 0;       // If error -> Reset 
-        CREN = 1;       // If error -> Reset 
+    while(!PIR1bits.RCIF);      // hold the program till RX buffer is free
+    if(RCSTAbits.OERR) {        // check for Error 
+        RCSTAbits.CREN = 0;     // if error -> restart UART
+        RCSTAbits.CREN = 1;
     }
-    while(!RCIF);       // hold the program till RX buffer is free
-    return RCREG;       //receive the value and send it to main function
+    return RCREG;               //receive the value and send it to main function
+}
+
+// Передача одного символа на шину RS-232
+void write_UART(char data) {
+    TXREG = data;
+    while(!TXSTAbits.TRMT);
 }
