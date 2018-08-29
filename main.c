@@ -63,31 +63,45 @@ void main(void) {
     OSCCONbits.SCS = 0b00;      // System Clock determined by FOSC<2:0> in Configuration Word 1.
     INTCONbits.GIE = 1;         // глобально разрешаем прерывания
     INTCONbits.PEIE = 1;        // разрешаем прерывания от периферии
-    TRISA   = 0x00;         // порт A весь на выход
-    RA2     = 1;
     
-    init_UART();            // конфигурируем порт RS-232
+    // Тестовые выходы
+    TRISAbits.TRISA1 = 0;       // пин RA1 (ножка 6) на выход
+    TRISAbits.TRISA2 = 0;       // пин RA2 (ножка 5) на выход
+    ANSELAbits.ANSA1 = 0;       // пин RA1 как дискретный I/O (не аналоговый)
+    ANSELAbits.ANSA2 = 0;       // пин RA2 как дискретный I/O (не аналоговый)
+    PORTAbits.RA1 = 1;          // для начала зажигаем светодиод
+    PORTAbits.RA2 = 1;
+    // Для наглядности помигаем
     __delay_ms(2000);
     RA2 = 0;
-//    write_UART('A');
+    __delay_ms(1000);
+    RA2 = 1;
+    
+    init_UART();                // конфигурируем порт RS-232
+    write_UART(0x76);
     
     while(1) {
-//        RA2 = BAUDCONbits.RCIDL;
-//        RA2 = RA5;
     }
 }
 
 
 // Main Interrupt Service Routine (ISR)
 void __interrupt() ISR(void) {
-//    if(RCIF) {              // если прерывание от принятого байта по RS-232 (UART)
-//        read_UART();        // читаем что же там пришло и реагируем
+    if(RCIF) {              // если прерывание от принятого байта по RS-232 (UART)
+        read_UART();        // читаем что же там пришло и реагируем
+        RA2 = 0;
+    }
+//    if(PIR1bits.TXIF) {
+//        TXREG = 0x17;
+//        RA2 = 0;
 //    }
 }
 
 
 // Конфигурируем EUSART как асинхронный порт RS-232 в режиме slave
 void init_UART(void) {
+    APFCONbits.RXDTSEL = 1;     // RX function is on RA5 (вместо RA1 по умолчанию)
+    APFCONbits.TXCKSEL = 1;     // TX function is on RA4 (вместо RA0 по умолчанию)
     TRISAbits.TRISA4 = 0;       // TX Pin set as output
     TRISAbits.TRISA5 = 1;       // RX Pin set as input
     ANSELAbits.ANSA4 = 0;       // Digital I/O (регистр ANSELA)
@@ -107,9 +121,10 @@ void init_UART(void) {
     TXSTAbits.TXEN = 1;         // Transmit Enable bit
     // регистр RCSTA: receive status and control register
     RCSTAbits.RX9  = 0;         // Selects 8-bit reception
-//    RCSTAbits.SPEN = 1;         // Serial port enabled (configures RX/DT and TX/CK pins as serial port pins)
-//    RCSTAbits.CREN = 1;         // Enables receiver
+    RCSTAbits.SPEN = 1;         // Serial port enabled (configures RX/DT and TX/CK pins as serial port pins)
+    RCSTAbits.CREN = 1;         // Enables receiver
 }
+
 
 // Получение данных по шине RS-232
 char read_UART(void) {
