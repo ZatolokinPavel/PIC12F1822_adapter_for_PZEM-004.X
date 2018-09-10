@@ -88,8 +88,21 @@ void main(void) {
 // Main Interrupt Service Routine (ISR)
 void __interrupt() ISR(void) {
     if(RCIF) {              // если прерывание от принятого байта по RS-232 (UART)
-        read_UART();        // читаем что же там пришло и реагируем
-        RA2 = 0;
+        TXREG = 0x55;
+        temp = read_UART();        // читаем что же там пришло и реагируем
+        switch(temp) {
+            case 0x17:
+                RA1 = 1;
+                RA2 = 0;
+                break;
+            case 0x34:
+                RA1 = 0;
+                RA2 = 1;
+                break;
+            default:
+                RA1 = 0;
+                RA2 = 0;
+        }
     }
 //    if(PIR1bits.TXIF) {
 //        TXREG = 0x17;
@@ -99,6 +112,7 @@ void __interrupt() ISR(void) {
 
 
 // Конфигурируем EUSART как асинхронный порт RS-232 в режиме slave
+// SYNC=0, BRG16=0, BRGH=1: Baud Rate =  Fosc/(16*(SPBRG+1)) = 16000000/(16*(103+1)) = 9615.38 bit per second
 void init_UART(void) {
     APFCONbits.RXDTSEL = 1;     // RX function is on RA5 (вместо RA1 по умолчанию)
     APFCONbits.TXCKSEL = 1;     // TX function is on RA4 (вместо RA0 по умолчанию)
@@ -111,8 +125,8 @@ void init_UART(void) {
     BAUDCONbits.BRG16 = 0;      // 8-bit Baud Rate Generator is used
     BAUDCONbits.WUE   = 0;      // Wake-up Enable bit = Receiver is operating normally
     BAUDCONbits.ABDEN = 0;      // Auto-Baud Detect mode is disabled
-    SPBRGH = 0;              // determines the period of the free running baud rate timer (520)
-    SPBRGL = 25;              // determines the period of the free running baud rate timer (520)
+    SPBRGH = 0;                 // determines the period of the free running baud rate timer
+    SPBRGL = 103;               // determines the period of the free running baud rate timer
     // регистр TXSTA: transmit status and control register
     TXSTAbits.BRGH = 1;         // High Baud Rate Select bit
     TXSTAbits.TX9  = 0;         // 9-bit Transmit Enable bit
@@ -129,11 +143,12 @@ void init_UART(void) {
 // Получение данных по шине RS-232
 char read_UART(void) {
     while(!PIR1bits.RCIF);      // hold the program till RX buffer is free
-    if(RCSTAbits.OERR) {        // check for Error 
-        RCSTAbits.CREN = 0;     // if error -> restart UART
+    if(RCSTAbits.OERR) {        // check for Receive Overrun Error 
+        RCSTAbits.CREN = 0;     // if error -> restart UART чтобы дальше принимать данные
         RCSTAbits.CREN = 1;
     }
-    return RCREG;               //receive the value and send it to main function
+    RCSTAbits.FERR;             // надо будет прочитать и обработать ошибку фрейма
+    return RCREG;               // receive the value and send it to main function
 }
 
 // Передача одного символа на шину RS-232
