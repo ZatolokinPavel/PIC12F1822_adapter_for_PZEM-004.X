@@ -41,12 +41,17 @@
 #define _XTAL_FREQ 16000000 // указываем рабочую частоту для функций задержки
 
 // Объявление глобальных переменных
-unsigned char temp = 0;			// временная переменная
+unsigned char i;            // Переменная «i» - уже более 25 лет на рынке счетчиков!
+char temp = 0;              // временная переменная
+char test_data[7] = {167,18,33,75,99,100,107};  // массив тестовых символов
+char uart_buffer[7];        // буфер для хранения принимаемых или передаваемых данных
+char uart_next_TX = 0;      // номер символа из буфера, который сейчас передаётся/принимается
 
 // Объявление всех функций, которые написаны после их вызова
 void init_UART(void);
 char read_UART(void);
-void write_UART(char);
+void write_UART(char[7]);
+void continue_write_UART(void);
 
 
 
@@ -72,13 +77,12 @@ void main(void) {
     PORTAbits.RA1 = 1;          // для начала зажигаем светодиод
     PORTAbits.RA2 = 1;
     // Для наглядности помигаем
-    __delay_ms(2000);
+    __delay_ms(500);
     RA2 = 0;
-    __delay_ms(1000);
+    __delay_ms(500);
     RA2 = 1;
     
     init_UART();                // конфигурируем порт RS-232
-    write_UART(0x76);
     
     while(1) {
     }
@@ -88,7 +92,8 @@ void main(void) {
 // Main Interrupt Service Routine (ISR)
 void __interrupt() ISR(void) {
     if(RCIF) {              // если прерывание от принятого байта по RS-232 (UART)
-        TXREG = 0x55;
+        write_UART(test_data);
+        
         temp = read_UART();        // читаем что же там пришло и реагируем
         switch(temp) {
             case 0x17:
@@ -104,10 +109,10 @@ void __interrupt() ISR(void) {
                 RA2 = 0;
         }
     }
-//    if(PIR1bits.TXIF) {
-//        TXREG = 0x17;
-//        RA2 = 0;
-//    }
+    
+    if(PIR1bits.TXIF) {         // если это прерывание от передачи по UART
+        continue_write_UART();  // то загружаем следующий символ в очередь передачи
+    }
 }
 
 
@@ -119,7 +124,7 @@ void init_UART(void) {
     TRISAbits.TRISA4 = 0;       // TX Pin set as output
     TRISAbits.TRISA5 = 1;       // RX Pin set as input
     ANSELAbits.ANSA4 = 0;       // Digital I/O (регистр ANSELA)
-    PIE1bits.TXIE = 1;          // Enables the USART transmit interrupt
+    PIE1bits.TXIE = 0;          // пока передавать нечего, отключаем USART transmit interrupt
     PIE1bits.RCIE = 1;          // Enables the USART receive interrupt
     BAUDCONbits.SCKP  = 0;      // Transmit non-inverted data to the TX/CK pin
     BAUDCONbits.BRG16 = 0;      // 8-bit Baud Rate Generator is used
@@ -151,8 +156,22 @@ char read_UART(void) {
     return RCREG;               // receive the value and send it to main function
 }
 
-// Передача одного символа на шину RS-232
-void write_UART(char data) {
-    TXREG = data;
-    while(!TXSTAbits.TRMT);
+// Передача массива из семи символов на шину RS-232
+void write_UART(char array[7]) {
+    if(uart_next_TX != 0) return;   // занято
+    for(i=0; i < 7; i++)
+        uart_buffer[i] = array[i];
+    TXREG = uart_buffer[0];     // первый символ на передачу, и он сразу ушел в TSR
+    TXREG = uart_buffer[1];     // второй символ в очередь на передачу
+    uart_next_TX = 2;           // номер следующего на передачу символа
+    PIE1bits.TXIE = 1;          // включаем прерывание когда очередь из TXREG уйдёт на передачу
+}
+
+void continue_write_UART(void) {
+    TXREG = uart_buffer[uart_next_TX];  // ставим в очередь на передачу следующий символ
+    uart_next_TX += 1;
+    if(uart_next_TX == 7) {     // был передан последний символ
+        uart_next_TX = 0;       // символов на передачу больше нет
+        PIE1bits.TXIE = 0;      // закончили передачу, прерывание нам уже не нужно
+    }
 }
