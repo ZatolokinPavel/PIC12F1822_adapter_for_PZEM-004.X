@@ -35,21 +35,36 @@
 #include <xc.h>             // стандартный для компилятора MPLAB XC8
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 #include <pic.h>            // общий для всех PIC
 #include <pic12f1822.h>
 
 #define _XTAL_FREQ 16000000 // указываем рабочую частоту для функций задержки
+#define _UART_ADDRESS 002   // адрес этого устройства будет 2.
+// Состояния приёма сообщений по шине RS-485
+#define _UART_RC_ADDR 0     // ожидаем адрес получателя
+#define _UART_RC_SIZE 1     // ожидаем размер сообщения
+#define _UART_RC_MSG  2     // ожидаем очередной байт сообщения
+#define _UART_RC_SUM  3     // ожидаем контрольную сумму
+#define _UART_RC_ERR  4     // уже ничё не ожидаем, словили ошибку
 
 // Объявление глобальных переменных
 unsigned char i;            // Переменная «i» - уже более 25 лет на рынке счетчиков!
 char temp = 0;              // временная переменная
 char test_data[7] = {167,18,33,75,99,100,107};  // массив тестовых символов
-char uart_buffer[7];        // буфер для хранения принимаемых или передаваемых данных
-char uart_next_TX = 0;      // номер символа из буфера, который сейчас передаётся/принимается
+char uart_TX_buffer[7];     // буфер для хранения передаваемых данных
+char uart_next_TX = 0;      // номер следующего символа, который будет передан по UART
+char uart_next_RC = 0;      // номер следующего символа, который будет принят по UART
+char uart_RC_state = 0;     // флаг состояния приёма сообщений по UART
+bool uart_RC_to_me = false; // этому ли устройству передают сообщение по RS-485?
+char uart_RC_msg_size = 0;  // количество байт сообщения, которое нужно принять по UART
+char uart_RC_message[1];    // собственно получаемое сообщение из шины RS-485
 
 // Объявление всех функций, которые написаны после их вызова
 void init_UART(void);
-char read_UART(void);
+char read_char_UART(void);
+void read_full_mess_UART(char);
+void action_on_msg_UART(void);
 void write_UART(char[7]);
 void continue_write_UART(void);
 
@@ -91,28 +106,16 @@ void main(void) {
 
 // Main Interrupt Service Routine (ISR)
 void __interrupt() ISR(void) {
-    if(RCIF) {              // если прерывание от принятого байта по RS-232 (UART)
-        write_UART(test_data);
-        
-        temp = read_UART();        // читаем что же там пришло и реагируем
-        switch(temp) {
-            case 0x17:
-                RA1 = 1;
-                RA2 = 0;
-                break;
-            case 0x34:
-                RA1 = 0;
-                RA2 = 1;
-                break;
-            default:
-                RA1 = 0;
-                RA2 = 0;
-        }
+    if(PIR1bits.RCIF) {             // если прерывание от принятого байта по RS-232 (UART)
+//        write_UART(test_data);
+        temp = read_char_UART();    // читаем принятый байт
+        read_full_mess_UART(temp);  // смотрим значение принятого байта и записываем полное сообщение
+        action_on_msg_UART();
     }
     
-    if(PIR1bits.TXIF) {         // если это прерывание от передачи по UART
-        continue_write_UART();  // то загружаем следующий символ в очередь передачи
-    }
+//    if(PIR1bits.TXIF) {         // если это прерывание от передачи по UART
+//        continue_write_UART();  // то загружаем следующий символ в очередь передачи
+//    }
 }
 
 
@@ -146,8 +149,7 @@ void init_UART(void) {
 
 
 // Получение данных по шине RS-232
-char read_UART(void) {
-    while(!PIR1bits.RCIF);      // hold the program till RX buffer is free
+char read_char_UART(void) {
     if(RCSTAbits.OERR) {        // check for Receive Overrun Error 
         RCSTAbits.CREN = 0;     // if error -> restart UART чтобы дальше принимать данные
         RCSTAbits.CREN = 1;
@@ -156,19 +158,72 @@ char read_UART(void) {
     return RCREG;               // receive the value and send it to main function
 }
 
+// Смотрим значение принятого байта - это адрес, размер или тело сообщения.
+// И формируем полное сообщение.
+void read_full_mess_UART(char byte) {
+    switch(uart_RC_state) {
+        case _UART_RC_ADDR:                 // если ожидали адрес получателя
+            uart_RC_to_me = (byte == _UART_ADDRESS);    // определяем, этому ли устройству адресовано сообщение?
+            uart_RC_state = _UART_RC_SIZE;              // следующий байт будет размер сообщения
+            break;
+        case _UART_RC_SIZE:                 // если ожидали размер сообщения
+            uart_RC_msg_size = byte;
+            if(uart_RC_msg_size != 1)       // если размер сообщения не такой как мы можем принять
+                uart_RC_to_me = false;      // то считаем что это не нам
+            uart_RC_state = _UART_RC_MSG;   // следующий байт - это уже данные
+            break;
+        case _UART_RC_MSG:                  // если ожидали очередной байт сообщения
+            if(uart_RC_to_me)
+                uart_RC_message[0] = byte;
+            uart_RC_msg_size--;
+            if(uart_RC_msg_size == 0)
+                uart_RC_state = _UART_RC_SUM;
+            break;
+        case _UART_RC_SUM:                  // если ожидали контрольную сумму
+            // TODO: нужно проверить контрольную сумму полученного сообщения
+            uart_RC_state = _UART_RC_ADDR;
+            break;
+        case _UART_RC_ERR:      // если уже словили ошибку
+            // TODO: надо продумать поведение
+            break;
+    }
+}
+
+void action_on_msg_UART(void) {
+    if(uart_RC_state != _UART_RC_ADDR) return;      // сообщение ещё не принято
+    if(!uart_RC_to_me) return;                      // сообщение не нам
+    switch (uart_RC_message[0]) {
+        case 0x34:
+            RA1 = 0;
+            RA2 = 1;
+            break;
+        case 0x78:
+            RA1 = 1;
+            RA2 = 0;
+            break;
+        case 0xff:
+            RA1 = 1;
+            RA2 = 1;
+            break;
+        default:
+            RA1 = 0;
+            RA2 = 0;
+    }
+}
+
 // Передача массива из семи символов на шину RS-232
 void write_UART(char array[7]) {
     if(uart_next_TX != 0) return;   // занято
     for(i=0; i < 7; i++)
-        uart_buffer[i] = array[i];
-    TXREG = uart_buffer[0];     // первый символ на передачу, и он сразу ушел в TSR
-    TXREG = uart_buffer[1];     // второй символ в очередь на передачу
+        uart_TX_buffer[i] = array[i];
+    TXREG = uart_TX_buffer[0];  // первый символ на передачу, и он сразу ушел в TSR
+    TXREG = uart_TX_buffer[1];  // второй символ в очередь на передачу
     uart_next_TX = 2;           // номер следующего на передачу символа
     PIE1bits.TXIE = 1;          // включаем прерывание когда очередь из TXREG уйдёт на передачу
 }
 
 void continue_write_UART(void) {
-    TXREG = uart_buffer[uart_next_TX];  // ставим в очередь на передачу следующий символ
+    TXREG = uart_TX_buffer[uart_next_TX];   // ставим в очередь на передачу следующий символ
     uart_next_TX += 1;
     if(uart_next_TX == 7) {     // был передан последний символ
         uart_next_TX = 0;       // символов на передачу больше нет
