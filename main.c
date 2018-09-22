@@ -52,13 +52,15 @@
 unsigned char i;            // Переменная «i» - уже более 25 лет на рынке счетчиков!
 char temp = 0;              // временная переменная
 char test_data[7] = {167,18,33,75,99,100,107};  // массив тестовых символов
+char test_data2[7] = {34,34,34,34,34,34,100};
+char test_data3[7] = {100,30,33,75,99,100,107};
 char uart_TX_buffer[7];     // буфер для хранения передаваемых данных
-char uart_next_TX = 0;      // номер следующего символа, который будет передан по UART
-char uart_next_RC = 0;      // номер следующего символа, который будет принят по UART
+char uart_TX_next = 0;      // номер следующего символа, который будет передан по UART
 char uart_RC_state = 0;     // флаг состояния приёма сообщений по UART
 bool uart_RC_to_me = false; // этому ли устройству передают сообщение по RS-485?
 char uart_RC_msg_size = 0;  // количество байт сообщения, которое нужно принять по UART
 char uart_RC_message[1];    // собственно получаемое сообщение из шины RS-485
+char uart_RC_next = 0;      // номер следующего символа, который будет принят по UART
 
 // Объявление всех функций, которые написаны после их вызова
 void init_UART(void);
@@ -66,7 +68,7 @@ char read_char_UART(void);
 void read_full_mess_UART(char);
 void action_on_msg_UART(void);
 void write_UART(char[7]);
-void continue_write_UART(void);
+void write_char_UART(void);
 
 
 
@@ -107,15 +109,14 @@ void main(void) {
 // Main Interrupt Service Routine (ISR)
 void __interrupt() ISR(void) {
     if(PIR1bits.RCIF) {             // если прерывание от принятого байта по RS-232 (UART)
-//        write_UART(test_data);
         temp = read_char_UART();    // читаем принятый байт
         read_full_mess_UART(temp);  // смотрим значение принятого байта и записываем полное сообщение
         action_on_msg_UART();
     }
     
-//    if(PIR1bits.TXIF) {         // если это прерывание от передачи по UART
-//        continue_write_UART();  // то загружаем следующий символ в очередь передачи
-//    }
+    if(PIR1bits.TXIF) {         // если это прерывание от передачи по UART
+        write_char_UART();      // то загружаем следующий символ в очередь передачи
+    }
 }
 
 
@@ -145,6 +146,27 @@ void init_UART(void) {
     RCSTAbits.RX9  = 0;         // Selects 8-bit reception
     RCSTAbits.SPEN = 1;         // Serial port enabled (configures RX/DT and TX/CK pins as serial port pins)
     RCSTAbits.CREN = 1;         // Enables receiver
+}
+
+
+// Передача массива из семи символов на шину RS-232
+void write_UART(char array[7]) {
+    if(uart_TX_next != 0) return;   // занято
+    for(i=0; i < 7; i++)
+        uart_TX_buffer[i] = array[i];
+    uart_TX_next = 1;               // номер следующего на передачу символа
+    PIE1bits.TXIE = 1;              // включаем прерывание что очередь из TXREG ушла на передачу
+    TXREG = uart_TX_buffer[0];      // первый символ на передачу
+}
+
+void write_char_UART(void) {
+    if(uart_TX_next == 0) return;   // ничего не передаётся
+    TXREG = uart_TX_buffer[uart_TX_next];   // ставим в очередь на передачу следующий символ
+    uart_TX_next += 1;
+    if(uart_TX_next == 7) {         // был передан последний символ
+        uart_TX_next = 0;           // символов на передачу больше нет
+        PIE1bits.TXIE = 0;          // закончили передачу, прерывание нам уже не нужно
+    }
 }
 
 
@@ -196,10 +218,12 @@ void action_on_msg_UART(void) {
         case 0x34:
             RA1 = 0;
             RA2 = 1;
+            write_UART(test_data);
             break;
         case 0x78:
             RA1 = 1;
             RA2 = 0;
+            write_UART(test_data3);
             break;
         case 0xff:
             RA1 = 1;
@@ -208,25 +232,5 @@ void action_on_msg_UART(void) {
         default:
             RA1 = 0;
             RA2 = 0;
-    }
-}
-
-// Передача массива из семи символов на шину RS-232
-void write_UART(char array[7]) {
-    if(uart_next_TX != 0) return;   // занято
-    for(i=0; i < 7; i++)
-        uart_TX_buffer[i] = array[i];
-    TXREG = uart_TX_buffer[0];  // первый символ на передачу, и он сразу ушел в TSR
-    TXREG = uart_TX_buffer[1];  // второй символ в очередь на передачу
-    uart_next_TX = 2;           // номер следующего на передачу символа
-    PIE1bits.TXIE = 1;          // включаем прерывание когда очередь из TXREG уйдёт на передачу
-}
-
-void continue_write_UART(void) {
-    TXREG = uart_TX_buffer[uart_next_TX];   // ставим в очередь на передачу следующий символ
-    uart_next_TX += 1;
-    if(uart_next_TX == 7) {     // был передан последний символ
-        uart_next_TX = 0;       // символов на передачу больше нет
-        PIE1bits.TXIE = 0;      // закончили передачу, прерывание нам уже не нужно
     }
 }
