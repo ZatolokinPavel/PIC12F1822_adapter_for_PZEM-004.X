@@ -52,8 +52,6 @@
 unsigned char i;            // Переменная «i» - уже более 25 лет на рынке счетчиков!
 char temp = 0;              // временная переменная
 char test_data[7] = {167,18,33,75,99,100,107};  // массив тестовых символов
-char test_data2[7] = {34,34,34,34,34,34,100};
-char test_data3[7] = {100,30,33,75,99,100,107};
 char uart_TX_buffer[7];     // буфер для хранения передаваемых данных
 char uart_TX_next = 0;      // номер следующего символа, который будет передан по UART
 char uart_RC_state = 0;     // флаг состояния приёма сообщений по UART
@@ -65,7 +63,7 @@ char uart_RC_next = 0;      // номер следующего символа, �
 // Объявление всех функций, которые написаны после их вызова
 void init_UART(void);
 char read_char_UART(void);
-void read_full_mess_UART(char);
+void read_UART(void);
 void action_on_msg_UART(void);
 void write_UART(char[7]);
 void write_char_UART(void);
@@ -109,8 +107,7 @@ void main(void) {
 // Main Interrupt Service Routine (ISR)
 void __interrupt() ISR(void) {
     if(PIR1bits.RCIF) {             // если прерывание от принятого байта по RS-232 (UART)
-        temp = read_char_UART();    // читаем принятый байт
-        read_full_mess_UART(temp);  // смотрим значение принятого байта и записываем полное сообщение
+        read_UART();                // по одному байту записываем полное сообщение
         action_on_msg_UART();
     }
     
@@ -170,19 +167,10 @@ void write_char_UART(void) {
 }
 
 
-// Получение данных по шине RS-232
-char read_char_UART(void) {
-    if(RCSTAbits.OERR) {        // check for Receive Overrun Error 
-        RCSTAbits.CREN = 0;     // if error -> restart UART чтобы дальше принимать данные
-        RCSTAbits.CREN = 1;
-    }
-    RCSTAbits.FERR;             // надо будет прочитать и обработать ошибку фрейма
-    return RCREG;               // receive the value and send it to main function
-}
-
-// Смотрим значение принятого байта - это адрес, размер или тело сообщения.
-// И формируем полное сообщение.
-void read_full_mess_UART(char byte) {
+// Получение байта данных по шине RS-232
+// и формирование полного сообщения.
+void read_UART() {
+    char byte = read_char_UART();           // читаем принятый байт
     switch(uart_RC_state) {
         case _UART_RC_ADDR:                 // если ожидали адрес получателя
             uart_RC_to_me = (byte == _UART_ADDRESS);    // определяем, этому ли устройству адресовано сообщение?
@@ -211,6 +199,16 @@ void read_full_mess_UART(char byte) {
     }
 }
 
+// Получение одного байта данных по шине RS-232
+char read_char_UART(void) {
+    if(RCSTAbits.OERR) {        // check for Receive Overrun Error 
+        RCSTAbits.CREN = 0;     // if error -> restart UART чтобы дальше принимать данные
+        RCSTAbits.CREN = 1;
+    }
+    RCSTAbits.FERR;             // надо будет прочитать и обработать ошибку фрейма
+    return RCREG;               // receive the value and send it to main function
+}
+
 void action_on_msg_UART(void) {
     if(uart_RC_state != _UART_RC_ADDR) return;      // сообщение ещё не принято
     if(!uart_RC_to_me) return;                      // сообщение не нам
@@ -223,7 +221,7 @@ void action_on_msg_UART(void) {
         case 0x78:
             RA1 = 1;
             RA2 = 0;
-            write_UART(test_data3);
+            write_UART(test_data);
             break;
         case 0xff:
             RA1 = 1;
