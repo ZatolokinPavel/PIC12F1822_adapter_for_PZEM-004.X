@@ -52,21 +52,29 @@
 unsigned char i;            // Переменная «i» - уже более 25 лет на рынке счетчиков!
 char temp = 0;              // временная переменная
 char test_data[7] = {167,18,33,75,99,100,107};  // массив тестовых символов
-char uart_TX_buffer[7];     // буфер для хранения передаваемых данных
+bool uart_in_MASTER = false;// изначально ждём приёма сообщений
+char uart_TX_buffer[7];     // буфер для хранения передаваемых данных по UART
 char uart_TX_next = 0;      // номер следующего символа, который будет передан по UART
 char uart_RC_state = 0;     // флаг состояния приёма сообщений по UART
 bool uart_RC_to_me = false; // этому ли устройству передают сообщение по RS-485?
 char uart_RC_msg_size = 0;  // количество байт сообщения, которое нужно принять по UART
 char uart_RC_message[1];    // собственно получаемое сообщение из шины RS-485
 char uart_RC_next = 0;      // номер следующего символа, который будет принят по UART
+bool i2c_in_MASTER = false; // изначально ждём приёма сообщений
+char i2c_RC_message[1];     // полученное по I2C сообщение
+char i2c_TX_buffer[2];      // буфер для хранения передаваемых данных по I2C
+char i2c_TX_next = 0;       // номер следующего символа, который будет передан по I2C
 
 // Объявление всех функций, которые написаны после их вызова
 void init_UART(void);
-char read_char_UART(void);
 void read_UART(void);
 void action_on_msg_UART(void);
 void write_UART(char[7]);
 void write_char_UART(void);
+void init_I2C(void);
+void read_slave_I2C(void);
+void write_master_I2C(char, char[1]);
+void write_char_I2C(void);
 
 
 
@@ -85,19 +93,25 @@ void main(void) {
     INTCONbits.PEIE = 1;        // разрешаем прерывания от периферии
     
     // Тестовые выходы
+    TRISAbits.TRISA0 = 0;       // пин RA0 (ножка 7) на выход
     TRISAbits.TRISA1 = 0;       // пин RA1 (ножка 6) на выход
     TRISAbits.TRISA2 = 0;       // пин RA2 (ножка 5) на выход
+    ANSELAbits.ANSA0 = 0;       // пин RA0 как дискретный I/O (не аналоговый)
     ANSELAbits.ANSA1 = 0;       // пин RA1 как дискретный I/O (не аналоговый)
     ANSELAbits.ANSA2 = 0;       // пин RA2 как дискретный I/O (не аналоговый)
+    PORTAbits.RA0 = 1;
     PORTAbits.RA1 = 1;          // для начала зажигаем светодиод
     PORTAbits.RA2 = 1;
     // Для наглядности помигаем
     __delay_ms(500);
-    RA2 = 0;
+    RA0 = 0;
     __delay_ms(500);
-    RA2 = 1;
+    RA0 = 1;
+    __delay_ms(500);
+    RA0 = 0;
     
-    init_UART();                // конфигурируем порт RS-232
+    init_UART();                // конфигурируем порт RS-232 как slave
+//    init_I2C();                 // конфигурируем I2C как slave
     
     while(1) {
     }
@@ -111,8 +125,17 @@ void __interrupt() ISR(void) {
         action_on_msg_UART();
     }
     
-    if(PIR1bits.TXIF) {         // если это прерывание от передачи по UART
-        write_char_UART();      // то загружаем следующий символ в очередь передачи
+    if(PIR1bits.TXIF) {             // если это прерывание от передачи по UART
+        write_char_UART();          // то загружаем следующий символ в очередь передачи
+    }
+    
+    if(PIR1bits.SSP1IF && !i2c_in_MASTER) {     // если это прерывание от I2C в режиме SLAVE
+        if(SSP1STATbits.R_nW) read_slave_I2C(); // по одному байту записываем полное сообщение
+        if(!SSP1STATbits.R_nW) {}
+    }
+    
+    if(PIR1bits.SSP1IF && i2c_in_MASTER) {      // если это прерывание от I2C в режиме MASTER
+        write_char_I2C();                       // загружаем следующий символ в очередь передачи
     }
 }
 
@@ -122,8 +145,8 @@ void __interrupt() ISR(void) {
 void init_UART(void) {
     APFCONbits.RXDTSEL = 1;     // RX function is on RA5 (вместо RA1 по умолчанию)
     APFCONbits.TXCKSEL = 1;     // TX function is on RA4 (вместо RA0 по умолчанию)
-    TRISAbits.TRISA4 = 0;       // TX Pin set as output
-    TRISAbits.TRISA5 = 1;       // RX Pin set as input
+    TRISAbits.TRISA4 = 0;       // TX pin set as output
+    TRISAbits.TRISA5 = 1;       // RX pin set as input
     ANSELAbits.ANSA4 = 0;       // Digital I/O (регистр ANSELA)
     PIE1bits.TXIE = 0;          // пока передавать нечего, отключаем USART transmit interrupt
     PIE1bits.RCIE = 1;          // Enables the USART receive interrupt
@@ -167,10 +190,16 @@ void write_char_UART(void) {
 }
 
 
-// Получение байта данных по шине RS-232
-// и формирование полного сообщения.
-void read_UART() {
-    char byte = read_char_UART();           // читаем принятый байт
+// Получение байта данных по шине RS-232 и формирование полного сообщения.
+void read_UART(void) {
+    // Получение одного байта данных по шине RS-232
+    if(RCSTAbits.OERR) {        // check for Receive Overrun Error 
+        RCSTAbits.CREN = 0;     // if error -> restart UART чтобы дальше принимать данные
+        RCSTAbits.CREN = 1;
+    }
+    RCSTAbits.FERR;             // надо будет прочитать и обработать ошибку фрейма
+    char byte = RCREG;          // читаем принятый байт
+    // смотрим что делать дальше с принятым байтом
     switch(uart_RC_state) {
         case _UART_RC_ADDR:                 // если ожидали адрес получателя
             uart_RC_to_me = (byte == _UART_ADDRESS);    // определяем, этому ли устройству адресовано сообщение?
@@ -193,20 +222,10 @@ void read_UART() {
             // TODO: нужно проверить контрольную сумму полученного сообщения
             uart_RC_state = _UART_RC_ADDR;
             break;
-        case _UART_RC_ERR:      // если уже словили ошибку
+        case _UART_RC_ERR:                  // если уже словили ошибку
             // TODO: надо продумать поведение
             break;
     }
-}
-
-// Получение одного байта данных по шине RS-232
-char read_char_UART(void) {
-    if(RCSTAbits.OERR) {        // check for Receive Overrun Error 
-        RCSTAbits.CREN = 0;     // if error -> restart UART чтобы дальше принимать данные
-        RCSTAbits.CREN = 1;
-    }
-    RCSTAbits.FERR;             // надо будет прочитать и обработать ошибку фрейма
-    return RCREG;               // receive the value and send it to main function
 }
 
 void action_on_msg_UART(void) {
@@ -227,8 +246,82 @@ void action_on_msg_UART(void) {
             RA1 = 1;
             RA2 = 1;
             break;
+        case 0x11:
+            i2c_in_MASTER = true;
+            init_I2C();
+            char test_data2[1] = {107};  // массив тестовых символов
+            write_master_I2C(0x36, test_data2);
+            write_UART(test_data);
+            break;
         default:
             RA1 = 0;
             RA2 = 0;
+    }
+}
+
+void init_I2C(void) {
+    TRISAbits.TRISA1 = 1;       // SCL pin set as input
+    TRISAbits.TRISA2 = 1;       // SDA pin set as input
+    // SSP1STAT
+    SSP1STATbits.SMP = 1;       // Slew rate control disabled for standard speed mode (100 kHz and 1 MHz)
+    SSP1STATbits.CKE = 0;       // Disable SMBus specific inputs
+    // SSP1CON1
+    SSP1CON1bits.WCOL = 0;      // No collision
+    SSP1CON1bits.SSPOV = 0;     // No overflow
+    SSP1CON1bits.SSPEN = 0;     // до конца настройки отключаем серийный порт
+    SSP1CON1bits.CKP = 0;       // Holds clock low (clock stretch). For Slave only
+    // SSP1CON2
+    SSP1CON2bits.GCEN = 0;      // General call address disabled
+    SSP1CON2bits.ACKDT = 0;     // Acknowledge Data bit: Acknowledge
+    // SSP1CON3
+    SSP1CON3bits.PCIE = 0;      // Stop detection interrupts are disabled
+    SSP1CON3bits.SCIE = 0;      // Start detection interrupts are disabled
+    SSP1CON3bits.BOEN = 0;      // SSP1BUF is only updated when SSP1OV is clear
+    SSP1CON3bits.SDAHT = 0;     // линия связи простая, поэтому большую задержку не надо
+    SSP1CON3bits.SBCDE = 0;     // Slave bus collision interrupts are disabled
+    SSP1CON3bits.AHEN = 0;      // Address holding is disabled
+    SSP1CON3bits.DHEN = 0;      // Data holding is disabled
+    // SSP1CON1
+    if(i2c_in_MASTER) {
+        SSP1CON1bits.SSPM = 0b1000;     // I2C Master mode, clock = FOSC / (4 * (SSP1ADD+1))
+        SSP1ADD = 0x09;                 // пробуем на частоте 100kHz
+    } else {
+        SSP1CON1bits.SSPM = 0b0110;     // I2C Slave mode, 7-bit address
+        SSP1ADD = 0b10101000;           // slave address = 0x54
+    }
+    // clear the interrupt flags
+    PIR1bits.SSP1IF = 0;
+    PIR2bits.BCL1IF = 0;
+    // enable the interrupts
+    PIE1bits.SSP1IE = 1;        // Enables the I2C receive interrupt
+    PIE2bits.BCL1IE = 1;        // Enables the MSSP Bus Collision Interrupt
+    SSP1CON1bits.SSPEN = 1;     // Enables serial port (configures SDA and SCL pins as serial port pins)
+}
+
+// Получение байта данных по шине I2C (slave) и формирование полного сообщения.
+void read_slave_I2C(void) {
+    PIR1bits.SSP1IF = 0;        // нужно очистить флаг прерывания
+    char byte = SSP1BUF;        // читаем принятый байт
+    if(SSP1STATbits.D_nA) {
+        i2c_RC_message[0] = byte;
+    }
+}
+
+void write_master_I2C(char address, char data[1]) {
+//    if(i2c_TX_next != 0) return;    // занято
+    i2c_TX_buffer[0] = address;     // первым будет передаваться адрес слейва
+    i2c_TX_buffer[1] = data[0];     // затем данные
+//    i2c_TX_next = 1;                // номер следующего на передачу символа
+    SSP1CON2bits.SEN = 1;           // запускаем передачу по i2c (состояние Start)
+}
+
+void write_char_I2C(void) {
+    PIR1bits.SSP1IF = 0;                    // нужно очистить флаг прерывания
+    SSP1BUF = i2c_TX_buffer[i2c_TX_next];   // ставим в очередь на передачу следующий символ
+    i2c_TX_next += 1;
+    if(i2c_TX_next == 2) {          // был передан последний символ
+        i2c_TX_next = 0;            // символов на передачу больше нет
+//        PIE1bits.TXIE = 0;          // закончили передачу, прерывание нам уже не нужно
+        SSP1CON2bits.PEN = 1;
     }
 }
