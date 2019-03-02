@@ -1,7 +1,7 @@
 
 <svg xmlns="http://www.w3.org/2000/svg"
      xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" width="1025"
-     height="628">
+     height="641">
     <defs>
         <linearGradient x1="0%" y1="0%" x2="0%" y2="100%"
                         id="mx-gradient-ffffff-1-ffffff-1-s-0">
@@ -9,7 +9,7 @@
             <stop offset="100%" style="stop-color:#ffffff"/>
         </linearGradient>
     </defs>
-    <g transform=" scale(0.94) translate(-691.5999755859375,-272)">
+    <g transform=" scale(0.94) translate(-691.5999755859375,-259.4)">
         <rect x="1354.8" y="418.8" width="2.4" height="2.4" fill="#000000"
               stroke="none" pointer-events="none"/>
         <rect x="1354.8" y="442.8" width="2.4" height="2.4" fill="#000000"
