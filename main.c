@@ -23,7 +23,7 @@
 #pragma config MCLRE    = ON    // RA3/MCLR/VPP pin function is MCLR
 #pragma config PWRTE    = ON    // Power-up Timer
 #pragma config WDTE     = OFF   // Watchdog Timer
-#pragma config FOSC     = INTOSC// Тактовый генератор (INTOSC - внутренний 20 МГц)
+#pragma config FOSC     = INTOSC// Тактовый генератор (INTOSC - внутренний 16 МГц)
 
 #pragma config LVP      = OFF   // Low-Voltage Programming
 #pragma config BORV     = LO    // Brown-out Reset Voltage Selection
@@ -47,6 +47,11 @@
 #define _UART_RC_MSG  2     // ожидаем очередной байт сообщения
 #define _UART_RC_SUM  3     // ожидаем контрольную сумму
 #define _UART_RC_ERR  4     // уже ничё не ожидаем, словили ошибку
+// Состояния передачи и приёма сообщений по шине I2C
+#define _I2C_IDLE     0     // приём или передача не ведётся
+#define _I2C_SENDING  1     // идёт отправка сообщения
+#define _I2C_STOPPING 2     // завершение передачи, будем отправлять условие STOP
+#define _I2C_STOPPED  3     // передача завершена, ждём состояния STOP
 
 // Объявление глобальных переменных
 unsigned char i;            // Переменная «i» - уже более 25 лет на рынке счетчиков!
@@ -61,9 +66,10 @@ char uart_RC_msg_size = 0;  // количество байт сообщения,
 char uart_RC_message[1];    // собственно получаемое сообщение из шины RS-485
 char uart_RC_next = 0;      // номер следующего символа, который будет принят по UART
 bool i2c_in_MASTER = false; // изначально ждём приёма сообщений
-char i2c_RC_message[1];     // полученное по I2C сообщение
-char i2c_TX_buffer[2];      // буфер для хранения передаваемых данных по I2C
+char i2c_state = _I2C_IDLE; // флаг состояния передачи/приёма сообщения по I2C
+char i2c_TX_buffer[2];      // буфер для хранения передаваемых данных по I2C (адрес и один байт данных)
 char i2c_TX_next = 0;       // номер следующего символа, который будет передан по I2C
+char i2c_RC_message[1];     // полученное по I2C сообщение
 
 // Объявление всех функций, которые написаны после их вызова
 void init_UART(void);
@@ -73,7 +79,7 @@ void write_UART(char[7]);
 void write_char_UART(void);
 void init_I2C(void);
 void read_slave_I2C(void);
-void write_master_I2C(char, char[1]);
+void write_master_I2C(char, char);
 void write_char_I2C(void);
 
 
@@ -87,6 +93,7 @@ void write_char_I2C(void);
 
 // Главная функция программы. С неё начинается выполнение программы.
 void main(void) {
+    OSCCONbits.SPLLEN = 1;      // игнорируется так как config PLLEN = ON
     OSCCONbits.IRCF = 0b1111;   // Internal Oscillator Frequency = 16 MHz HF
     OSCCONbits.SCS = 0b00;      // System Clock determined by FOSC<2:0> in Configuration Word 1.
     INTCONbits.GIE = 1;         // глобально разрешаем прерывания
@@ -136,6 +143,10 @@ void __interrupt() ISR(void) {
     
     if(PIR1bits.SSP1IF && i2c_in_MASTER) {      // если это прерывание от I2C в режиме MASTER
         write_char_I2C();                       // загружаем следующий символ в очередь передачи
+    }
+    
+    if(PIR2bits.BCL1IF && i2c_in_MASTER) {      // проблема с шиной I2C
+        PIR2bits.BCL1IF = 0;
     }
 }
 
@@ -200,7 +211,7 @@ void read_UART(void) {
     RCSTAbits.FERR;             // надо будет прочитать и обработать ошибку фрейма
     char byte = RCREG;          // читаем принятый байт
     // смотрим что делать дальше с принятым байтом
-    switch(uart_RC_state) {
+    switch (uart_RC_state) {
         case _UART_RC_ADDR:                 // если ожидали адрес получателя
             uart_RC_to_me = (byte == _UART_ADDRESS);    // определяем, этому ли устройству адресовано сообщение?
             uart_RC_state = _UART_RC_SIZE;              // следующий байт будет размер сообщения
@@ -247,13 +258,15 @@ void action_on_msg_UART(void) {
             RA2 = 1;
             break;
         case 0x11:
-            i2c_in_MASTER = true;
-            init_I2C();
-            char test_data2[1] = {107};  // массив тестовых символов
-            write_master_I2C(0x36, test_data2);
+            if(!i2c_in_MASTER) {
+                i2c_in_MASTER = true;
+                init_I2C();
+            }
+            write_master_I2C(0x68, 0x00);
             write_UART(test_data);
             break;
         default:
+            RA0 = 0;
             RA1 = 0;
             RA2 = 0;
     }
@@ -284,7 +297,7 @@ void init_I2C(void) {
     // SSP1CON1
     if(i2c_in_MASTER) {
         SSP1CON1bits.SSPM = 0b1000;     // I2C Master mode, clock = FOSC / (4 * (SSP1ADD+1))
-        SSP1ADD = 0x09;                 // пробуем на частоте 100kHz
+        SSP1ADD = 39;                   // задаём частоту 100kHz
     } else {
         SSP1CON1bits.SSPM = 0b0110;     // I2C Slave mode, 7-bit address
         SSP1ADD = 0b10101000;           // slave address = 0x54
@@ -307,21 +320,35 @@ void read_slave_I2C(void) {
     }
 }
 
-void write_master_I2C(char address, char data[1]) {
-//    if(i2c_TX_next != 0) return;    // занято
+void write_master_I2C(char address, char data) {
+    if(i2c_state != _I2C_IDLE) return;  // занято
+    address = address << 1;
+    address = address | 0;          // направление передачи - запись
     i2c_TX_buffer[0] = address;     // первым будет передаваться адрес слейва
-    i2c_TX_buffer[1] = data[0];     // затем данные
-//    i2c_TX_next = 1;                // номер следующего на передачу символа
-    SSP1CON2bits.SEN = 1;           // запускаем передачу по i2c (состояние Start)
+    i2c_TX_buffer[1] = data;        // затем данные
+    write_char_I2C();               // начинаем передачу
 }
 
 void write_char_I2C(void) {
-    PIR1bits.SSP1IF = 0;                    // нужно очистить флаг прерывания
-    SSP1BUF = i2c_TX_buffer[i2c_TX_next];   // ставим в очередь на передачу следующий символ
-    i2c_TX_next += 1;
-    if(i2c_TX_next == 2) {          // был передан последний символ
-        i2c_TX_next = 0;            // символов на передачу больше нет
-//        PIE1bits.TXIE = 0;          // закончили передачу, прерывание нам уже не нужно
-        SSP1CON2bits.PEN = 1;
+    PIR1bits.SSP1IF = 0;                // нужно очистить флаг прерывания
+    switch (i2c_state) {
+        case _I2C_IDLE:
+            i2c_state = _I2C_SENDING;
+            i2c_TX_next = 0;
+            SSP1CON2bits.SEN = 1;       // запускаем передачу по i2c (состояние START)
+            break;
+        case _I2C_SENDING:
+            SSP1BUF = i2c_TX_buffer[i2c_TX_next];   // ставим в очередь на передачу следующий символ
+            i2c_TX_next += 1;
+            if(i2c_TX_next == 2)        // если был передан последний символ
+                i2c_state = _I2C_STOPPING;
+            break;
+        case _I2C_STOPPING:
+            i2c_state = _I2C_STOPPED;
+            SSP1CON2bits.PEN = 1;       // отправляем команду STOP
+            break;
+        case _I2C_STOPPED:
+            i2c_state = _I2C_IDLE;
+            break;
     }
 }
