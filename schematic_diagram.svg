@@ -710,11 +710,6 @@
               pointer-events="none"/>
         <ellipse cx="1548" cy="876" rx="2.4" ry="2.4" fill="#000000"
                  stroke="#000000" stroke-width="2.4" pointer-events="none"/>
-        <path d="M 1080 516 L 1080 372 L 1070.4 372" fill="none"
-              stroke="#000000" stroke-width="2.4" stroke-miterlimit="10"
-              pointer-events="none"/>
-        <ellipse cx="1068" cy="372" rx="2.4" ry="2.4" fill="#000000"
-                 stroke="#000000" stroke-width="2.4" pointer-events="none"/>
         <path d="M 1176 636 L 1176 873.6" fill="none" stroke="#000000"
               stroke-width="2.4" stroke-miterlimit="10" pointer-events="none"/>
         <ellipse cx="1176" cy="876" rx="2.4" ry="2.4" fill="#000000"
@@ -780,5 +775,9 @@
                 Current coil
             </text>
         </g>
+        <path d="M 1080 516 L 1080 374.4" fill="none" stroke="#000000"
+              stroke-width="2.4" stroke-miterlimit="10" pointer-events="none"/>
+        <ellipse cx="1080" cy="372" rx="2.4" ry="2.4" fill="#000000"
+                 stroke="#000000" stroke-width="2.4" pointer-events="none"/>
     </g>
 </svg>
