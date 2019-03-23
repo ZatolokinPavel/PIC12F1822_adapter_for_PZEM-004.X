@@ -86,7 +86,9 @@ void action_on_msg_UART(void);
 void write_UART(char[7]);
 void write_char_UART(void);
 void init_I2C(void);
-void read_slave_I2C(void);
+void interrupt_I2C(void);
+void write_to_slave_I2C(void);
+void read_from_slave_I2C(void);
 void write_master_I2C(char, char);
 void write_char_I2C(void);
 void read_master_I2C(char, char);
@@ -128,7 +130,7 @@ void main(void) {
     RA0 = 0;
     
     init_UART();                // конфигурируем порт RS-232 как slave
-//    init_I2C();                 // конфигурируем I2C как slave
+    init_I2C();                 // конфигурируем I2C как slave
     
     while(1) {
     }
@@ -146,22 +148,7 @@ void __interrupt() ISR(void) {
         write_char_UART();          // то загружаем следующий символ в очередь передачи
     }
     
-    if(PIR1bits.SSP1IF && !i2c_in_MASTER) {     // если это прерывание от I2C в режиме SLAVE
-        if(SSP1STATbits.R_nW) read_slave_I2C(); // по одному байту записываем полное сообщение
-        if(!SSP1STATbits.R_nW) {}
-    }
-    
-    if(PIR1bits.SSP1IF && i2c_in_MASTER) {      // если это прерывание от I2C в режиме MASTER
-        PIR1bits.SSP1IF = 0;                    // нужно очистить флаг прерывания
-        switch (i2c_RW) {
-            case _WRITE: write_char_I2C(); break;   // загружаем следующий символ в очередь передачи
-            case _READ: read_char_I2C(); break;
-        }
-    }
-    
-    if(PIR2bits.BCL1IF && i2c_in_MASTER) {      // проблема с шиной I2C
-        PIR2bits.BCL1IF = 0;
-    }
+    interrupt_I2C();
 }
 
 
@@ -276,7 +263,7 @@ void action_on_msg_UART(void) {
                 i2c_in_MASTER = true;
                 init_I2C();
             }
-            write_master_I2C(0x68, 0x00);
+            write_master_I2C(0x03, 0x01);
             write_UART(test_data);
             break;
         case 0x12:
@@ -304,6 +291,7 @@ void init_I2C(void) {
     // SSP1CON2
     SSP1CON2bits.GCEN = 0;      // General call address disabled
     SSP1CON2bits.ACKDT = 0;     // Acknowledge Data bit: Acknowledge
+    SSP1CON2bits.SEN = 0;       // для slave отключаем задержку ответа (clock stretching)
     // SSP1CON3
     SSP1CON3bits.PCIE = 0;      // Stop detection interrupts are disabled
     SSP1CON3bits.SCIE = 0;      // Start detection interrupts are disabled
@@ -318,7 +306,8 @@ void init_I2C(void) {
         SSP1ADD = 39;                   // задаём частоту 100kHz
     } else {
         SSP1CON1bits.SSPM = 0b0110;     // I2C Slave mode, 7-bit address
-        SSP1ADD = 0b10101000;           // slave address = 0x54
+        SSPMSK  = 0x7F << 1;            // маска адреса
+        SSP1ADD = 0x03 << 1;            // slave address = 0x03
     }
     // clear the interrupt flags
     PIR1bits.SSP1IF = 0;
@@ -329,14 +318,40 @@ void init_I2C(void) {
     SSP1CON1bits.SSPEN = 1;     // Enables serial port (configures SDA and SCL pins as serial port pins)
 }
 
-// Получение байта данных по шине I2C (slave) и формирование полного сообщения.
-void read_slave_I2C(void) {
-    PIR1bits.SSP1IF = 0;        // нужно очистить флаг прерывания
-    char byte = SSP1BUF;        // читаем принятый байт
-    if(SSP1STATbits.D_nA) {
-        i2c_RC_message[0] = byte;
+void interrupt_I2C(void) {
+    if(PIR1bits.SSP1IF && !i2c_in_MASTER) {     // если это прерывание от I2C в режиме SLAVE
+        PIR1bits.SSP1IF = 0;                    // нужно очистить флаг прерывания
+        switch (SSP1STATbits.R_nW) {
+            case 0: write_to_slave_I2C(); break;// по одному байту записываем полное сообщение
+            case 1: read_from_slave_I2C(); break;
+        }
+    }
+    
+    if(PIR1bits.SSP1IF && i2c_in_MASTER) {      // если это прерывание от I2C в режиме MASTER
+        PIR1bits.SSP1IF = 0;                    // нужно очистить флаг прерывания
+        switch (i2c_RW) {
+            case _WRITE: write_char_I2C(); break;   // загружаем следующий символ в очередь передачи
+            case _READ: read_char_I2C(); break;
+        }
+    }
+    
+    if(PIR2bits.BCL1IF && i2c_in_MASTER) {      // проблема с шиной I2C
+        PIR2bits.BCL1IF = 0;
+    }
+    
+    if(PIR2bits.BCL1IF && !i2c_in_MASTER) {     // проблема с шиной I2C
     }
 }
+
+// Получение байта данных по шине I2C (slave) и формирование полного сообщения.
+void write_to_slave_I2C(void) {
+    char byte = SSP1BUF;                // читаем принятый байт
+    if(SSP1STATbits.D_nA) {             // если это адрес, то игнорируем его
+        i2c_RC_message[0] = byte;       // TODO: надо же принимать несколько байтов, а не один
+    }
+}
+
+void read_from_slave_I2C(void) {}
 
 void write_master_I2C(char address, char data) {
     if(i2c_state != _I2C_IDLE) return;  // занято
