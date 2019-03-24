@@ -62,6 +62,8 @@
 unsigned char i;            // Переменная «i» - уже более 25 лет на рынке счетчиков!
 char temp = 0;              // временная переменная
 char test_data[7] = {167,18,33,75,99,100,107};  // массив тестовых символов
+char init_unit_2[7] = {0xF0,0,0,0,0,0,0xF0};    // команда перевода в режим second unit
+char unit_id = 0;           // 0 - не определено, 1 - первая микросхема адаптера, 2 - вторая
 bool uart_in_MASTER = false;// изначально ждём приёма сообщений
 char uart_TX_buffer[7];     // буфер для хранения передаваемых данных по UART
 char uart_TX_next = 0;      // номер следующего символа, который будет передан по UART
@@ -75,11 +77,14 @@ char i2c_RW;                // сейчас производим чтение и
 char i2c_state = _I2C_IDLE; // флаг состояния передачи/приёма сообщения по I2C
 char i2c_address;           // адрес слейва I2C
 char i2c_next = 0;          // номер следующего символа, который будет передан или принят по I2C
-char i2c_TX_buffer[2];      // буфер для хранения передаваемых данных по I2C (адрес и один байт данных)
+char i2c_TX_length;         // длина передаваемого сообщения
+char i2c_TX_buffer[7];      // буфер для хранения передаваемых данных по I2C (семь байт данных)
 char i2c_RC_length;         // длина получаемого от слейва сообщения
-char i2c_RC_message[8];     // полученное по I2C сообщение
+char i2c_RC_message[7];     // полученное по I2C сообщение
 
 // Объявление всех функций, которые написаны после их вызова
+void init_first_unit(void);
+void init_second_unit(void);
 void init_UART(void);
 void read_UART(void);
 void action_on_msg_UART(void);
@@ -89,10 +94,12 @@ void init_I2C(void);
 void interrupt_I2C(void);
 void write_to_slave_I2C(void);
 void read_from_slave_I2C(void);
-void write_master_I2C(char, char);
+void write_master_I2C(char, char[7], char);
 void write_char_I2C(void);
 void read_master_I2C(char, char);
 void read_char_I2C(void);
+void master_I2C_sent_a_message(char[7]);
+void slave_I2C_received_a_message(char[7]);
 
 
 
@@ -259,21 +266,55 @@ void action_on_msg_UART(void) {
             RA2 = 1;
             break;
         case 0x11:
-            if(!i2c_in_MASTER) {
-                i2c_in_MASTER = true;
-                init_I2C();
-            }
-            write_master_I2C(0x03, 0x01);
+            if (unit_id == 0)           // если назначение этой микросхемы ещё не определено
+                init_first_unit();
             write_UART(test_data);
             break;
         case 0x12:
-            read_master_I2C(0x68, 8);
+            read_master_I2C(0x68, 7);
             write_UART(test_data);
             break;
         default:
             RA0 = 0;
             RA1 = 0;
             RA2 = 0;
+    }
+}
+
+// Перевод этого микроконтроллера в режим первого контроллера
+// и отправка второму контроллеру команды перейти в режим второго.
+void init_first_unit(void) {
+    uart_in_MASTER = false;
+    i2c_in_MASTER = true;
+    init_I2C();
+    write_master_I2C(0x03, init_unit_2, 7); // отправляем на вторую микросхему команду перейти в режим second unit
+    unit_id = 1;
+}
+
+// Перевод этого микроконтроллера в режим второго контроллера
+// первый в это время переключит свой I2C в режим slave.
+void init_second_unit(void) {
+    uart_in_MASTER = true;
+    i2c_in_MASTER = true;
+    init_UART();
+    init_I2C();
+    unit_id = 2;
+}
+
+void master_I2C_sent_a_message(char msg[7]) {
+    if (unit_id == 1 && msg[0] == init_unit_2[0]) {
+        i2c_in_MASTER = false;
+        init_I2C();
+    }
+}
+
+void slave_I2C_received_a_message(char msg[7]) {
+    // TODO: надо вначале проверить контрольную сумму
+    switch (msg[0]) {
+        case 0xF0:                  // приняли команду перейти в режим second unit
+            if (unit_id == 0)       // если назначение этой микросхемы ещё не определено
+                init_second_unit();
+            break;
     }
 }
 
@@ -293,7 +334,7 @@ void init_I2C(void) {
     SSP1CON2bits.ACKDT = 0;     // Acknowledge Data bit: Acknowledge
     SSP1CON2bits.SEN = 0;       // для slave отключаем задержку ответа (clock stretching)
     // SSP1CON3
-    SSP1CON3bits.PCIE = 0;      // Stop detection interrupts are disabled
+    SSP1CON3bits.PCIE = 1;      // Stop detection interrupts are enabled
     SSP1CON3bits.SCIE = 0;      // Start detection interrupts are disabled
     SSP1CON3bits.BOEN = 0;      // SSP1BUF is only updated when SSP1OV is clear
     SSP1CON3bits.SDAHT = 0;     // линия связи простая, поэтому большую задержку не надо
@@ -346,18 +387,25 @@ void interrupt_I2C(void) {
 // Получение байта данных по шине I2C (slave) и формирование полного сообщения.
 void write_to_slave_I2C(void) {
     char byte = SSP1BUF;                // читаем принятый байт
-    if(SSP1STATbits.D_nA) {             // если это адрес, то игнорируем его
-        i2c_RC_message[0] = byte;       // TODO: надо же принимать несколько байтов, а не один
+    if (!SSP1STATbits.D_nA) {           // приняли адрес этого устройства
+        i2c_next = 0;
+    } else if (!SSP1STATbits.P) {       // приняли один байт данных
+        i2c_RC_message[i2c_next] = byte;
+        i2c_next += 1;
+    } else {                            // приём окончен
+        slave_I2C_received_a_message(i2c_RC_message);
     }
 }
 
 void read_from_slave_I2C(void) {}
 
-void write_master_I2C(char address, char data) {
+void write_master_I2C(char address, char data[7], char length) {
     if(i2c_state != _I2C_IDLE) return;  // занято
     i2c_RW = _WRITE;
     i2c_address = address << 1 | 0;     // адрес слейва и направление передачи - запись
-    i2c_TX_buffer[0] = data;            // данные для передачи
+    i2c_TX_length = length;             // сохраняем длину передаваемого сообщения
+    for(i=0; i < i2c_TX_length; i++)
+        i2c_TX_buffer[i] = data[i];     // данные для передачи
     write_char_I2C();                   // начинаем передачу
 }
 
@@ -375,7 +423,7 @@ void write_char_I2C(void) {
         case _I2C_WRITING:
             SSP1BUF = i2c_TX_buffer[i2c_next];  // ставим в очередь на передачу следующий символ
             i2c_next += 1;
-            if(i2c_next == 1)           // если был передан последний символ (а сейчас он только один)
+            if(i2c_next == i2c_TX_length)       // если был передан последний символ
                 i2c_state = _I2C_STOPPING;
             break;
         case _I2C_STOPPING:
@@ -384,6 +432,7 @@ void write_char_I2C(void) {
             break;
         case _I2C_STOPPED:
             i2c_state = _I2C_IDLE;
+            master_I2C_sent_a_message(i2c_TX_buffer);
             break;
     }
 }
