@@ -76,7 +76,7 @@ char uart_TX_next = 0;      // номер следующего символа, �
 char uart_RC_state = 0;     // флаг состояния приёма сообщений по UART
 bool uart_RC_to_me = false; // этому ли устройству передают сообщение по RS-485?
 char uart_RC_msg_size = 0;  // количество байт сообщения, которое нужно принять по UART
-char uart_RC_message[1];    // собственно получаемое сообщение из шины RS-485
+char uart_RC_message[7];    // собственно получаемое сообщение из шины RS-485
 char uart_RC_next = 0;      // номер следующего символа, который будет принят по UART
 bool i2c_in_MASTER = false; // изначально ждём приёма сообщений
 char i2c_RW;                // сейчас производим чтение или запись (актуально для мастера)
@@ -93,7 +93,7 @@ void init_first_unit(void);
 void init_second_unit(void);
 void init_UART(void);
 void read_UART(void);
-void action_on_msg_UART(void);
+void action_on_msg_UART(char[7]);
 void write_UART(char[7]);
 void write_char_UART(void);
 void init_I2C(void);
@@ -106,6 +106,7 @@ void read_master_I2C(char, char);
 void read_char_I2C(void);
 void master_I2C_sent_a_message(char[7]);
 void slave_I2C_received_a_message(char[7]);
+void loop__get_data_from_PZEM(void);
 
 
 
@@ -142,6 +143,8 @@ void main(void) {
     __delay_ms(500);
     RA0 = 0;
     
+    uart_in_MASTER = false;
+    i2c_in_MASTER = false;
     init_UART();                // конфигурируем порт RS-232 как slave
     init_I2C();                 // конфигурируем I2C как slave
     
@@ -154,7 +157,6 @@ void main(void) {
 void __interrupt() ISR(void) {
     if(PIR1bits.RCIF) {             // если прерывание от принятого байта по RS-232 (UART)
         read_UART();                // по одному байту записываем полное сообщение
-        action_on_msg_UART();
     }
     
     if(PIR1bits.TXIF) {             // если это прерывание от передачи по UART
@@ -226,43 +228,62 @@ void read_UART(void) {
     char byte = RCREG;          // читаем принятый байт
     // смотрим что делать дальше с принятым байтом
     switch (uart_RC_state) {
-        case _UART_RC_ADDR:                 // если ожидали адрес получателя
-            uart_RC_to_me = (byte == _UART_ADDRESS);    // определяем, этому ли устройству адресовано сообщение?
-            uart_RC_state = _UART_RC_SIZE;              // следующий байт будет размер сообщения
+        case _UART_RC_ADDR:                         // если ожидали адрес получателя
+            uart_RC_to_me = (byte == _UART_ADDRESS);// определяем, этому ли устройству адресовано сообщение?
+            uart_RC_state = _UART_RC_SIZE;          // следующий байт будет размер сообщения
             break;
-        case _UART_RC_SIZE:                 // если ожидали размер сообщения
+        case _UART_RC_SIZE:                         // если ожидали размер сообщения
             uart_RC_msg_size = byte;
-            if(uart_RC_msg_size != 1)       // если размер сообщения не такой как мы можем принять
-                uart_RC_to_me = false;      // то считаем что это не нам
-            uart_RC_state = _UART_RC_MSG;   // следующий байт - это уже данные
+            if(uart_RC_msg_size != 1)               // если размер сообщения не такой как мы можем принять
+                uart_RC_to_me = false;              // то считаем что это не нам
+            uart_RC_state = _UART_RC_MSG;           // следующий байт - это уже данные
+            uart_RC_next = 0;                       // будет принят первый байт сообщения
             break;
-        case _UART_RC_MSG:                  // если ожидали очередной байт сообщения
+        case _UART_RC_PZEM:                         // сообщение от PZEM не содержит адреса а размера
+            uart_RC_to_me = true;                   // без вариантов, только нам
+            uart_RC_msg_size = 6;                   // примем символы данных, а контрольную сумму отдельно
+            uart_RC_message[0] = byte;              // уже сохраняем первый байт
+            uart_RC_next = 1;                       // готовимся принимать второй
+            uart_RC_state = _UART_RC_MSG;
+            break;
+        case _UART_RC_MSG:                          // если ожидали очередной байт сообщения
             if(uart_RC_to_me)
-                uart_RC_message[0] = byte;
-            uart_RC_msg_size--;
-            if(uart_RC_msg_size == 0)
+                uart_RC_message[uart_RC_next] = byte;
+            uart_RC_next += 1;
+            if(uart_RC_next == uart_RC_msg_size)
                 uart_RC_state = _UART_RC_SUM;
             break;
-        case _UART_RC_SUM:                  // если ожидали контрольную сумму
+        case _UART_RC_SUM:                          // если ожидали контрольную сумму
             // TODO: нужно проверить контрольную сумму полученного сообщения
-            uart_RC_state = _UART_RC_ADDR;
+            if (unit_id == 2) {
+                uart_RC_message[uart_RC_next] = byte;
+                uart_RC_state = _UART_RC_PZEM;
+            } else {
+                uart_RC_state = _UART_RC_ADDR;
+            }
+            uart_RC_next = 0;                       // символов на приём больше нет
+            action_on_msg_UART(uart_RC_message);    // обрабатываем принятое сообщение
             break;
-        case _UART_RC_ERR:                  // если уже словили ошибку
+        case _UART_RC_ERR:                          // если уже словили ошибку
             // TODO: надо продумать поведение
             break;
     }
 }
 
-void action_on_msg_UART(void) {
-    if(uart_RC_state != _UART_RC_ADDR) return;      // сообщение ещё не принято
-    if(!uart_RC_to_me) return;                      // сообщение не нам
-    switch (uart_RC_message[0]) {
+void action_on_msg_UART(char message[7]) {
+    if (unit_id == 2) {
+        write_master_I2C(_I2C__ADDRESS, message, 7);
+        return;
+    }
+    if (!uart_RC_to_me) return;                      // сообщение не нам
+    switch (message[0]) {
         case 0x34:
             RA1 = 0;
             RA2 = 1;
             write_UART(test_data);
             break;
         case 0x78:
+            RA0 = 1;
             RA1 = 1;
             RA2 = 0;
             write_UART(test_data);
@@ -293,7 +314,7 @@ void init_first_unit(void) {
     uart_in_MASTER = false;
     i2c_in_MASTER = true;
     init_I2C();
-    write_master_I2C(0x03, init_unit_2, 7); // отправляем на вторую микросхему команду перейти в режим second unit
+    write_master_I2C(_I2C__ADDRESS, init_unit_2, 7);    // отправляем на вторую микросхему команду перейти в режим second unit
     unit_id = 1;
 }
 
@@ -320,8 +341,14 @@ void slave_I2C_received_a_message(char msg[7]) {
         case 0xF0:                  // приняли команду перейти в режим second unit
             if (unit_id == 0)       // если назначение этой микросхемы ещё не определено
                 init_second_unit();
+            loop__get_data_from_PZEM();
             break;
     }
+}
+
+void loop__get_data_from_PZEM(void) {
+    write_UART(pzem_voltage);
+    uart_RC_state = _UART_RC_PZEM;  // готовим UART принимать ответ от датчика
 }
 
 void init_I2C(void) {
@@ -354,7 +381,7 @@ void init_I2C(void) {
     } else {
         SSP1CON1bits.SSPM = 0b0110;     // I2C Slave mode, 7-bit address
         SSPMSK  = 0x7F << 1;            // маска адреса
-        SSP1ADD = 0x03 << 1;            // slave address = 0x03
+        SSP1ADD = _I2C__ADDRESS << 1;   // slave address = 0x03
     }
     // clear the interrupt flags
     PIR1bits.SSP1IF = 0;
